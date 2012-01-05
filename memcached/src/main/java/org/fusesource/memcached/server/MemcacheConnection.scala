@@ -23,11 +23,15 @@ import org.fusesource.hawtdispatch.transport._
 import org.fusesource.memcached.codec._
 import java.util.concurrent.TimeUnit._
 import org.fusesource.hawtbuf.Buffer
-import java.nio.ByteBuffer
-import org.iq80.memory.{ByteBufferAllocation, Allocation, Allocator, Region}
+import org.iq80.memory.{ByteBufferAllocation, Allocation, Allocator}
 import java.util.concurrent.atomic.AtomicInteger
+import collection.mutable.ListBuffer
 
 object BufferAllocator extends Allocator {
+
+  def region(address: Long, length: Long) = throw new UnsupportedOperationException
+  def region(address: Long) = throw new UnsupportedOperationException
+
   def allocate(size: Long): Allocation = {
     if (size < 0) {
       throw new IllegalArgumentException("Size is negative: " + size)
@@ -41,14 +45,16 @@ object BufferAllocator extends Allocator {
     wrap(new Buffer(size.asInstanceOf[Int]))
   }
 
-  def wrap(buffer:Buffer) = new BufferAllocation(this, buffer, idGenerator.incrementAndGet)
+  def wrap(buffer:Buffer) = new BufferAllocation(buffer, idGenerator.incrementAndGet)
 
   private final val idGenerator: AtomicInteger = new AtomicInteger
   
 }
 
-class BufferAllocation(allocator:Allocator, buffer:Buffer, id:Int) 
-  extends ByteBufferAllocation(allocator, ByteBuffer.wrap(buffer.data, buffer.offset, buffer.length), id) 
+class BufferAllocation(buffer:Buffer, id:Int)
+  extends ByteBufferAllocation(buffer.toByteBuffer.slice(), id) {
+  override def getAllocator: Allocator = BufferAllocator
+}
 
 /**
  *
@@ -56,7 +62,7 @@ class BufferAllocation(allocator:Allocator, buffer:Buffer, id:Int)
  */
 class MemcacheConnection( val server: MemcacheServer, val transport: Transport) extends TransportListener {
 
-  this.transport.setProtocolCodec(new MemcacheProtocolCodec(server.value_allocator))
+  this.transport.setProtocolCodec(new MemcacheProtocolCodec(server.cache_entry_allocator))
   this.transport.setDispatchQueue(Dispatch.createQueue(transport.getRemoteAddress.toString))
   this.transport.setTransportListener(this)
   this.transport.start(null)
@@ -79,7 +85,30 @@ class MemcacheConnection( val server: MemcacheServer, val transport: Transport) 
     }
   }
 
+  def onRefill: Unit = {
+    while(!sendQueue.isEmpty) {
+      if(transport.offer(sendQueue.head)) {
+        sendQueue.remove(0)
+      } else {
+        return
+      }
+    }
+  }
 
+  val sendQueue = ListBuffer[Response]()
+  def send(resp:Response) = {
+    if( sendQueue.isEmpty ) {
+      if(transport.offer(resp)) {
+        true
+      } else {
+        sendQueue += resp
+        false
+      }
+    } else {
+      sendQueue += resp
+      false
+    }
+  }
 
   def onTransportCommand(command: AnyRef): Unit = {
 
@@ -94,7 +123,7 @@ class MemcacheConnection( val server: MemcacheServer, val transport: Transport) 
             server.cache.flush()
           }
         }
-        transport.offer(TEXT_OK)
+        send(TEXT_OK)
         
       case TEXT_QUIT =>
         quit = true
@@ -115,11 +144,20 @@ class MemcacheConnection( val server: MemcacheServer, val transport: Transport) 
           } else {
             server.cache.insert(value)
           }
-          transport.offer(TEXT_STORED)
+          send(TEXT_STORED)
         } else {
           // Not enough memory..
-          transport.offer(TEXT_NOT_STORED)
+          send(TEXT_NOT_STORED)
         }
+      case TEXT_GET(keys) =>
+
+        keys.foreach { key =>
+          val item = server.cache.get(BufferAllocator.wrap(key))
+          if(item!=null) {
+            send(TEXT_VALUE(server.cache_entry_allocator.wrap(item), item.getFlags, Some(item.getCas.toInt) ))
+          }
+        }
+        send(TEXT_END)
 
       case x:UNKNOWN =>
         transport.offer(TEXT_ERROR)
@@ -290,8 +328,5 @@ class MemcacheConnection( val server: MemcacheServer, val transport: Transport) 
     }
   }
 
-  def onRefill: Unit = {
-    // println("onrefill")
-  }
 
 }

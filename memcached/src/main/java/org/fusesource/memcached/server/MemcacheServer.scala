@@ -22,8 +22,8 @@ import org.fusesource.hawtdispatch._
 import org.fusesource.hawtdispatch.transport._
 import org.iq80.memcached._
 import org.fusesource.hawtbuf.Buffer
-import org.fusesource.memcached.codec.{Entry, EntryAllocator}
 import org.iq80.memory._
+import org.fusesource.memcached.codec.{EntryAllocator, Entry}
 
 
 /**
@@ -64,12 +64,23 @@ class MemcacheServer(uri:URI) {
   var transport_server: TcpTransportServer = _
   var allocator:Allocator = _
 
-  val value_allocator = new EntryAllocator {
+  def toBuffer(region:Region) = {
+    val rc = new Buffer(region.size().toInt);
+    region.getBytes(0, rc.data)
+    rc
+  }
+  
+  var cache:FlatMap = _
+
+  object cache_entry_allocator extends EntryAllocator {
     def allocate(key: Buffer, size: Int) = {
       CacheEntry(key, size, cache.allocateItem(key.toByteArray, 0, 0, size))
     }
+
+    def wrap(item:FlatMap.Item) = {
+      CacheEntry(toBuffer(item.getKey), item.getValue.size().toInt, item)
+    }
   }
-  var cache:FlatMap = _
 
   var max_memory = 1024*1024*256
   var factor=1.25d
@@ -78,7 +89,7 @@ class MemcacheServer(uri:URI) {
   var max_item_size = 1024*4;
 
   def start[T](on_complete: =>T ): Unit = {
-    allocator = new UnsafeAllocator()
+    allocator = ByteBufferAllocator.INSTANCE
     var slab_allocator = new SlabAllocator(allocator, max_memory, factor, prealloc, chunk_size, max_item_size)
     cache = new FlatMap(slab_allocator)
 

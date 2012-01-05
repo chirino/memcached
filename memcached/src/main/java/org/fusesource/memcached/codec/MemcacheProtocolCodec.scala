@@ -41,7 +41,7 @@ sealed trait Message
 sealed trait Response extends Message
 sealed trait Request extends Message
 
-sealed trait RequestWithEntry extends Request {
+sealed trait EntryBlock {
   def entry:Entry
 }
 
@@ -53,13 +53,14 @@ object TEXT_NOT_FOUND extends Response
 object TEXT_STORED extends Response
 object TEXT_NOT_STORED extends Response
 object TEXT_EXISTS extends Response
+case class TEXT_VALUE(entry:Entry, flags:Int, cas:Option[Int]) extends Response with EntryBlock
 
-case class TEXT_SET(entry:Entry, flags:Int, expire:Int, noreply:Boolean) extends RequestWithEntry
-case class TEXT_ADD(entry:Entry, flags:Int, expire:Int, noreply:Boolean) extends RequestWithEntry
-case class TEXT_REPLACE(entry:Entry, flags:Int, expire:Int, noreply:Boolean) extends RequestWithEntry
-case class TEXT_APPEND(entry:Entry, flags:Int, expire:Int, noreply:Boolean) extends RequestWithEntry
-case class TEXT_PREPEND(entry:Entry, flags:Int, expire:Int, noreply:Boolean) extends RequestWithEntry
-case class TEXT_CAS(entry:Entry, flags:Int, expire:Int, cas:Long, noreply:Boolean) extends RequestWithEntry
+case class TEXT_SET(entry:Entry, flags:Int, expire:Int, noreply:Boolean) extends Request with EntryBlock
+case class TEXT_ADD(entry:Entry, flags:Int, expire:Int, noreply:Boolean) extends Request with EntryBlock
+case class TEXT_REPLACE(entry:Entry, flags:Int, expire:Int, noreply:Boolean) extends Request with EntryBlock
+case class TEXT_APPEND(entry:Entry, flags:Int, expire:Int, noreply:Boolean) extends Request with EntryBlock
+case class TEXT_PREPEND(entry:Entry, flags:Int, expire:Int, noreply:Boolean) extends Request with EntryBlock
+case class TEXT_CAS(entry:Entry, flags:Int, expire:Int, cas:Int, noreply:Boolean) extends Request with EntryBlock
 case class TEXT_GET(keys:Array[Buffer]) extends Request
 case class TEXT_GETS(keys:Array[Buffer]) extends Request
 case class TEXT_DELETE(key:Buffer, time:Int, noreply:Boolean) extends Request
@@ -100,6 +101,7 @@ object MemcacheProtocolConstants {
   val STORED_RESP = ascii("STORED")
   val NOT_STORED_RESP = ascii("NOT_STORED")
   val EXISTS_RESP = ascii("EXISTS")
+  val VALUE_RESP = ascii("VALUE")
 
   val SPACE = ' '.toByte
   val NL = '\n'.toByte
@@ -166,8 +168,8 @@ class MemcacheProtocolCodec(val allocator:EntryAllocator, var protocol_type:Prot
       
       def noreply(arg:Int) = opt(arg).map(_ == NOREPLY_ARG).getOrElse(false)
 
-      def try_read_value(x:RequestWithEntry):AnyRef = {
-        next_decode_action = read_text_value(x) _
+      def try_read_entry_value(x:EntryBlock):AnyRef = {
+        next_decode_action = read_text_entry_value(x) _
         next_decode_action()
       }
       
@@ -178,17 +180,17 @@ class MemcacheProtocolCodec(val allocator:EntryAllocator, var protocol_type:Prot
 
       cmd.ascii() match {
         case SET_REQ =>
-          try_read_value(TEXT_SET(allocate(args(1), args(4)), args(2), args(3), noreply(5)))
+          try_read_entry_value(TEXT_SET(allocate(args(1), args(4)), args(2), args(3), noreply(5)))
         case PREPEND_REQ =>
-          try_read_value(TEXT_PREPEND(allocate(args(1), args(4)), args(2), args(3), noreply(5)))
+          try_read_entry_value(TEXT_PREPEND(allocate(args(1), args(4)), args(2), args(3), noreply(5)))
         case APPEND_REQ => 
-          try_read_value(TEXT_APPEND(allocate(args(1), args(4)), args(2), args(3), noreply(5)))
+          try_read_entry_value(TEXT_APPEND(allocate(args(1), args(4)), args(2), args(3), noreply(5)))
         case ADD_REQ =>
-          try_read_value(TEXT_ADD(allocate(args(1), args(4)), args(2), args(3), noreply(5)))
+          try_read_entry_value(TEXT_ADD(allocate(args(1), args(4)), args(2), args(3), noreply(5)))
         case REPLACE_REQ =>
-          try_read_value(TEXT_REPLACE(allocate(args(1), args(4)), args(2), args(3), noreply(5)))
+          try_read_entry_value(TEXT_REPLACE(allocate(args(1), args(4)), args(2), args(3), noreply(5)))
         case CAS_REQ =>
-          try_read_value(TEXT_CAS(allocate(args(1), args(4)), args(2), args(3), args(5), noreply(6)))
+          try_read_entry_value(TEXT_CAS(allocate(args(1), args(4)), args(2), args(3), args(5), noreply(6)))
 
         case INCR_REQ =>
           TEXT_INCR( args(1), args(2), noreply(3))
@@ -204,8 +206,12 @@ class MemcacheProtocolCodec(val allocator:EntryAllocator, var protocol_type:Prot
         case FLUSH_ALL_REQ =>
           val delay = opt(1).map(to_int(_)).getOrElse(0)
           TEXT_FLUSH_ALL( delay, noreply(2) )
+
         case QUIT_REQ        => TEXT_QUIT
-        case OK_RESP         => TEXT_OK
+
+        case OK_RESP         =>  TEXT_OK
+        case VALUE_RESP      =>
+          try_read_entry_value(TEXT_VALUE(allocate(args(1), args(3)), args(2), opt(4).map(to_int(_))))
         case ERROR_RESP      => TEXT_ERROR
         case END_RESP        => TEXT_END
         case DELETED_RESP    => TEXT_DELETED
@@ -219,8 +225,8 @@ class MemcacheProtocolCodec(val allocator:EntryAllocator, var protocol_type:Prot
     }
   }
 
-  private def read_text_value(x:RequestWithEntry)() = {
-    val buffer = x.entry.value.asInstanceOf[ByteBufferAllocation].getBufferSafe()
+  private def read_text_entry_value(x:EntryBlock)() = {
+    val buffer = x.entry.value.toByteBuffer
     if( read_direct(buffer) ) {
 
       def read_text_value_nl():AnyRef = {
@@ -286,7 +292,7 @@ class MemcacheProtocolCodec(val allocator:EntryAllocator, var protocol_type:Prot
               } else {
                 val item = allocator.allocate(key, value_length)
                 def read_value():AnyRef = {
-                  val value_buffer = item.value.asInstanceOf[ByteBufferAllocation].getBufferSafe()
+                  val value_buffer = item.value.toByteBuffer
                   if( read_direct(value_buffer) ) {
                     next_decode_action = read_binary_frame _
                     binary_decode(header, magic, opcode, data_type, status, cas, extras, key, item)
@@ -361,6 +367,9 @@ class MemcacheProtocolCodec(val allocator:EntryAllocator, var protocol_type:Prot
   protected def encode_text(value: AnyRef) = value match {
 
     case TEXT_OK         => encode7(OK_RESP)
+    case TEXT_VALUE(item, flags, cas) =>
+      encode8(VALUE_RESP, item, flags, cas);
+
     case TEXT_ERROR      => encode7(ERROR_RESP)
     case TEXT_END        => encode7(END_RESP)
     case TEXT_DELETED    => encode7(DELETED_RESP)
@@ -421,10 +430,10 @@ class MemcacheProtocolCodec(val allocator:EntryAllocator, var protocol_type:Prot
       next_write_buffer.write(NOREPLY_ARG)
     }
     next_write_buffer.write(LINE_END)
-    write_direct(item.value.asInstanceOf[ByteBufferAllocation].getBufferSafe())
+    write_direct(item.value.toByteBuffer)
   }
 
-  def encode2(command:Buffer, item:Entry, flags:Int, expire:Long, cas:Long, noreply:Boolean):Unit = {
+  def encode2(command:Buffer, item:Entry, flags:Int, expire:Long, cas:Int, noreply:Boolean):Unit = {
     next_write_buffer.write(command)
     next_write_buffer.write(SPACE)
     next_write_buffer.write(item.key)
@@ -441,7 +450,7 @@ class MemcacheProtocolCodec(val allocator:EntryAllocator, var protocol_type:Prot
       next_write_buffer.write(NOREPLY_ARG)
     }
     next_write_buffer.write(LINE_END)
-    write_direct(item.value.asInstanceOf[ByteBufferAllocation].getBufferSafe())
+    write_direct(item.value.toByteBuffer)
   }
 
   def encode3(command:Buffer, key:Buffer, value:Long, noreply:Boolean):Unit = {
@@ -492,6 +501,21 @@ class MemcacheProtocolCodec(val allocator:EntryAllocator, var protocol_type:Prot
         next_write_buffer.write(NOREPLY_ARG)
       }
     }
+    next_write_buffer.write(LINE_END)
+  }
+
+  def encode8(command:Buffer, item:Entry, flags:Int, cas:Option[Int]):Unit = {
+    next_write_buffer.write(command)
+    next_write_buffer.write(SPACE)
+    next_write_buffer.write(item.key)
+    next_write_buffer.write(SPACE)
+    next_write_buffer.write(ascii(flags.toString))
+    if(cas.isDefined) {
+      next_write_buffer.write(SPACE)
+      next_write_buffer.write(ascii(cas.get.toString))
+    }
+    next_write_buffer.write(LINE_END)
+    write_direct(item.value.toByteBuffer)
     next_write_buffer.write(LINE_END)
   }
 

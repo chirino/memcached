@@ -48,10 +48,10 @@ class MemcacheServerTest extends TestCase {
   class Client {
     var socket = new Socket("127.0.0.1", server.transport_server.getSocketAddress.getPort)
     
-    def write(value:String) = socket.getOutputStream.write(value.getBytes("UTF-8"));
+    def write(value:String) = socket.getOutputStream.write((value+"\r\n").getBytes("UTF-8"));
 
     def write_data(command:String, key:String, value:String, noreply:Boolean=false, flags:Int=0, exp:Int=0) = {
-      write("%s %s %d %d %d%s\r\n%s\r\n".format(
+      write("%s %s %d %d %d%s\r\n%s".format(
         command, key, flags, exp, value.length(), if(noreply) " noreply" else "", value
       ))
     }
@@ -87,7 +87,13 @@ class MemcacheServerTest extends TestCase {
 
     val client = connect
     client.write_data("set", "hello", "world")
-    assertEquals("STORED", client.read())
+    assertEquals("STORED\r\n", client.read())
+    client.write("get hello")
+    assertEquals(
+        "VALUE hello 1 1\r\n" +
+        "world\r\n" +
+        "END\r\n"
+      , client.read())
 
   }
 }
