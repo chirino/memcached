@@ -137,10 +137,10 @@ class MemcacheProtocolCodec(val allocator:EntryAllocator, var protocol_type:Prot
     } else {
       if( initial.get(0) >= 0x80 ) {
         protocol_type = BINARY_PROTOCOL
-        next_decode_action = read_text_frame _
+        next_decode_action = read_binary_frame _
       } else {
         protocol_type = TEXT_PROTOCOL
-        next_decode_action = read_binary_frame _
+        next_decode_action = read_text_frame _
       }
       next_decode_action()
     }
