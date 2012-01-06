@@ -7,3 +7,7 @@ manager and hash implementation.
 # Current status
 
 Just getting started... Move along now.  Nothing to see here.
+
+# Building
+
+This project depends on you first doing a source build of [this fork of the `org.iq80.memcached` library](https://github.com/chirino/dain-memcached).
