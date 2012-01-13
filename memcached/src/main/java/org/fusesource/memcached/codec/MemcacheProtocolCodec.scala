@@ -17,13 +17,13 @@
  */
 package org.fusesource.memcached.codec
 
-import org.fusesource.memcached.transport._
 import java.net.ProtocolException
 import org.fusesource.hawtbuf.DataByteArrayInputStream
 
 import org.fusesource.hawtbuf.Buffer
 import org.fusesource.hawtbuf.Buffer._
-import org.iq80.memory.{ByteBufferAllocation, Region}
+import org.iq80.memory.Region
+import org.fusesource.hawtdispatch.transport.AbstractProtocolCodec
 
 trait Entry {
   def key:Buffer
@@ -126,30 +126,34 @@ object BINARY_PROTOCOL extends ProtocolType
 class MemcacheProtocolCodec(val allocator:EntryAllocator, var protocol_type:ProtocolType=DETECT_PROTOCOL) extends AbstractProtocolCodec {
   import MemcacheProtocolConstants._
 
-  protected def initial_decode_action = protocol_type match {
+  implicit def toAction(func:()=>AnyRef):AbstractProtocolCodec.Action = new AbstractProtocolCodec.Action {
+    def apply = func()
+  }
+  
+  protected def initialDecodeAction = protocol_type match {
     case DETECT_PROTOCOL => detect_protocol _
     case TEXT_PROTOCOL => read_text_frame _
     case BINARY_PROTOCOL => read_binary_frame _
   }
 
   private def detect_protocol():AnyRef = {
-    val initial = peek_bytes(1)
+    val initial = peekBytes(1)
     if( initial==null ) {
       null
     } else {
       if( initial.get(0) >= 0x80 ) {
         protocol_type = BINARY_PROTOCOL
-        next_decode_action = read_binary_frame _
+        nextDecodeAction = read_binary_frame _
       } else {
         protocol_type = TEXT_PROTOCOL
-        next_decode_action = read_text_frame _
+        nextDecodeAction = read_text_frame _
       }
-      next_decode_action()
+      nextDecodeAction()
     }
   }
 
   private def read_text_frame():AnyRef = {
-    val line = read_until(NL, MAX_LINE_LENGTH)
+    val line = readUntil(NL, MAX_LINE_LENGTH)
     if( line == null ) {
       return null
     } else {
@@ -169,8 +173,8 @@ class MemcacheProtocolCodec(val allocator:EntryAllocator, var protocol_type:Prot
       def noreply(arg:Int) = opt(arg).map(_ == NOREPLY_ARG).getOrElse(false)
 
       def try_read_entry_value(x:EntryBlock):AnyRef = {
-        next_decode_action = read_text_entry_value(x) _
-        next_decode_action()
+        nextDecodeAction = read_text_entry_value(x) _
+        nextDecodeAction()
       }
       
       implicit def to_int(value:Buffer):Int = value.ascii().toString.toInt
@@ -227,10 +231,10 @@ class MemcacheProtocolCodec(val allocator:EntryAllocator, var protocol_type:Prot
 
   private def read_text_entry_value(x:EntryBlock)() = {
     val buffer = x.entry.value.toByteBuffer
-    if( read_direct(buffer) ) {
+    if( readDirect(buffer) ) {
 
       def read_text_value_nl():AnyRef = {
-        val line = read_until(NL, 2)
+        val line = readUntil(NL, 2)
         if( line == null ) {
           return null
         } else {
@@ -238,21 +242,21 @@ class MemcacheProtocolCodec(val allocator:EntryAllocator, var protocol_type:Prot
           if(line.length != 0) {
             throw new ProtocolException("trailing data detected after value")
           } else {
-            next_decode_action = read_text_frame _
+            nextDecodeAction = read_text_frame _
             return x
           }
         }
       }
 
-      next_decode_action = read_text_value_nl _
-      next_decode_action()
+      nextDecodeAction = read_text_value_nl _
+      nextDecodeAction()
     } else {
       null
     }
   }
 
   private def read_binary_frame():AnyRef = {
-    val header = read_bytes(24)
+    val header = readBytes(24)
     if( header == null ) {
       return null
     } else {
@@ -275,42 +279,42 @@ class MemcacheProtocolCodec(val allocator:EntryAllocator, var protocol_type:Prot
       }
 
       def read_extras():AnyRef = {
-        val extras = read_bytes(extras_length);
+        val extras = readBytes(extras_length);
         if( extras == null ) {
           null
         } else {
 
           def read_key():AnyRef = {
-            val key = read_bytes(key_length);
+            val key = readBytes(key_length);
             if( key == null ) {
               null
             } else {
               val value_length = body_length-(extras_length+key_length)
               if( value_length == 0 ) {
-                next_decode_action = read_binary_frame _
+                nextDecodeAction = read_binary_frame _
                 binary_decode(header, magic, opcode, data_type, status, cas, extras, key, null)
               } else {
                 val item = allocator.allocate(key, value_length)
                 def read_value():AnyRef = {
                   val value_buffer = item.value.toByteBuffer
-                  if( read_direct(value_buffer) ) {
-                    next_decode_action = read_binary_frame _
+                  if( readDirect(value_buffer) ) {
+                    nextDecodeAction = read_binary_frame _
                     binary_decode(header, magic, opcode, data_type, status, cas, extras, key, item)
                   } else {
                     null
                   }
                 }
-                next_decode_action = read_value _
-                next_decode_action()
+                nextDecodeAction = read_value _
+                nextDecodeAction()
               }
             }
           }
-          next_decode_action = read_key _
-          next_decode_action()
+          nextDecodeAction = read_key _
+          nextDecodeAction()
         }
       }
-      next_decode_action = read_extras _
-      next_decode_action()
+      nextDecodeAction = read_extras _
+      nextDecodeAction()
     }
   }
 
@@ -339,7 +343,7 @@ class MemcacheProtocolCodec(val allocator:EntryAllocator, var protocol_type:Prot
   }
 
 
-  protected def encode(value: AnyRef) = protocol_type match {
+  protected def encode(value: AnyRef):Unit = protocol_type match {
     case TEXT_PROTOCOL =>
       encode_text(value)
     case BINARY_PROTOCOL =>
@@ -411,112 +415,112 @@ class MemcacheProtocolCodec(val allocator:EntryAllocator, var protocol_type:Prot
   }
 
   def encode7(command:Buffer):Unit = {
-    next_write_buffer.write(command)
-    next_write_buffer.write(LINE_END)
+    nextWriteBuffer.write(command)
+    nextWriteBuffer.write(LINE_END)
   }
 
   def encode0(command:Buffer, item:Entry, flags:Int, expire:Long, noreply:Boolean):Unit = {
-    next_write_buffer.write(command)
-    next_write_buffer.write(SPACE)
-    next_write_buffer.write(item.key)
-    next_write_buffer.write(SPACE)
-    next_write_buffer.write(ascii(flags.toString))
-    next_write_buffer.write(SPACE)
-    next_write_buffer.write(ascii(expire.toString))
-    next_write_buffer.write(SPACE)
-    next_write_buffer.write(ascii(item.size.toString))
+    nextWriteBuffer.write(command)
+    nextWriteBuffer.write(SPACE)
+    nextWriteBuffer.write(item.key)
+    nextWriteBuffer.write(SPACE)
+    nextWriteBuffer.write(ascii(flags.toString))
+    nextWriteBuffer.write(SPACE)
+    nextWriteBuffer.write(ascii(expire.toString))
+    nextWriteBuffer.write(SPACE)
+    nextWriteBuffer.write(ascii(item.size.toString))
     if(noreply) {
-      next_write_buffer.write(SPACE)
-      next_write_buffer.write(NOREPLY_ARG)
+      nextWriteBuffer.write(SPACE)
+      nextWriteBuffer.write(NOREPLY_ARG)
     }
-    next_write_buffer.write(LINE_END)
-    write_direct(item.value.toByteBuffer)
+    nextWriteBuffer.write(LINE_END)
+    writeDirect(item.value.toByteBuffer)
   }
 
   def encode2(command:Buffer, item:Entry, flags:Int, expire:Long, cas:Int, noreply:Boolean):Unit = {
-    next_write_buffer.write(command)
-    next_write_buffer.write(SPACE)
-    next_write_buffer.write(item.key)
-    next_write_buffer.write(SPACE)
-    next_write_buffer.write(ascii(flags.toString))
-    next_write_buffer.write(SPACE)
-    next_write_buffer.write(ascii(expire.toString))
-    next_write_buffer.write(SPACE)
-    next_write_buffer.write(ascii(item.size.toString))
-    next_write_buffer.write(SPACE)
-    next_write_buffer.write(ascii(cas.toString))
+    nextWriteBuffer.write(command)
+    nextWriteBuffer.write(SPACE)
+    nextWriteBuffer.write(item.key)
+    nextWriteBuffer.write(SPACE)
+    nextWriteBuffer.write(ascii(flags.toString))
+    nextWriteBuffer.write(SPACE)
+    nextWriteBuffer.write(ascii(expire.toString))
+    nextWriteBuffer.write(SPACE)
+    nextWriteBuffer.write(ascii(item.size.toString))
+    nextWriteBuffer.write(SPACE)
+    nextWriteBuffer.write(ascii(cas.toString))
     if(noreply) {
-      next_write_buffer.write(SPACE)
-      next_write_buffer.write(NOREPLY_ARG)
+      nextWriteBuffer.write(SPACE)
+      nextWriteBuffer.write(NOREPLY_ARG)
     }
-    next_write_buffer.write(LINE_END)
-    write_direct(item.value.toByteBuffer)
+    nextWriteBuffer.write(LINE_END)
+    writeDirect(item.value.toByteBuffer)
   }
 
   def encode3(command:Buffer, key:Buffer, value:Long, noreply:Boolean):Unit = {
-    next_write_buffer.write(command)
-    next_write_buffer.write(SPACE)
-    next_write_buffer.write(key)
-    next_write_buffer.write(SPACE)
-    next_write_buffer.write(ascii(value.toString))
+    nextWriteBuffer.write(command)
+    nextWriteBuffer.write(SPACE)
+    nextWriteBuffer.write(key)
+    nextWriteBuffer.write(SPACE)
+    nextWriteBuffer.write(ascii(value.toString))
     if(noreply) {
-      next_write_buffer.write(SPACE)
-      next_write_buffer.write(NOREPLY_ARG)
+      nextWriteBuffer.write(SPACE)
+      nextWriteBuffer.write(NOREPLY_ARG)
     }
-    next_write_buffer.write(LINE_END)
+    nextWriteBuffer.write(LINE_END)
   }
 
   def encode4(command:Buffer, key:Buffer, time:Long, noreply:Boolean):Unit = {
-    next_write_buffer.write(command)
-    next_write_buffer.write(SPACE)
-    next_write_buffer.write(key)
+    nextWriteBuffer.write(command)
+    nextWriteBuffer.write(SPACE)
+    nextWriteBuffer.write(key)
     if(time!=0 || noreply) {
-      next_write_buffer.write(SPACE)
-      next_write_buffer.write(ascii(time.toString))
+      nextWriteBuffer.write(SPACE)
+      nextWriteBuffer.write(ascii(time.toString))
       if(noreply) {
-        next_write_buffer.write(SPACE)
-        next_write_buffer.write(NOREPLY_ARG)
+        nextWriteBuffer.write(SPACE)
+        nextWriteBuffer.write(NOREPLY_ARG)
       }
     }
-    next_write_buffer.write(LINE_END)
+    nextWriteBuffer.write(LINE_END)
   }
 
   def encode5(command:Buffer, args:Array[Buffer]):Unit = {
-    next_write_buffer.write(command)
-    next_write_buffer.write(SPACE)
+    nextWriteBuffer.write(command)
+    nextWriteBuffer.write(SPACE)
     args.foreach { arg =>
-      next_write_buffer.write(SPACE)
-      next_write_buffer.write(arg)
+      nextWriteBuffer.write(SPACE)
+      nextWriteBuffer.write(arg)
     }
-    next_write_buffer.write(LINE_END)
+    nextWriteBuffer.write(LINE_END)
   }
 
   def encode6(command:Buffer, time:Long, noreply:Boolean):Unit = {
-    next_write_buffer.write(command)
+    nextWriteBuffer.write(command)
     if(time!=0 || noreply) {
-      next_write_buffer.write(SPACE)
-      next_write_buffer.write(ascii(time.toString))
+      nextWriteBuffer.write(SPACE)
+      nextWriteBuffer.write(ascii(time.toString))
       if(noreply) {
-        next_write_buffer.write(SPACE)
-        next_write_buffer.write(NOREPLY_ARG)
+        nextWriteBuffer.write(SPACE)
+        nextWriteBuffer.write(NOREPLY_ARG)
       }
     }
-    next_write_buffer.write(LINE_END)
+    nextWriteBuffer.write(LINE_END)
   }
 
   def encode8(command:Buffer, item:Entry, flags:Int, cas:Option[Int]):Unit = {
-    next_write_buffer.write(command)
-    next_write_buffer.write(SPACE)
-    next_write_buffer.write(item.key)
-    next_write_buffer.write(SPACE)
-    next_write_buffer.write(ascii(flags.toString))
+    nextWriteBuffer.write(command)
+    nextWriteBuffer.write(SPACE)
+    nextWriteBuffer.write(item.key)
+    nextWriteBuffer.write(SPACE)
+    nextWriteBuffer.write(ascii(flags.toString))
     if(cas.isDefined) {
-      next_write_buffer.write(SPACE)
-      next_write_buffer.write(ascii(cas.get.toString))
+      nextWriteBuffer.write(SPACE)
+      nextWriteBuffer.write(ascii(cas.get.toString))
     }
-    next_write_buffer.write(LINE_END)
-    write_direct(item.value.toByteBuffer)
-    next_write_buffer.write(LINE_END)
+    nextWriteBuffer.write(LINE_END)
+    writeDirect(item.value.toByteBuffer)
+    nextWriteBuffer.write(LINE_END)
   }
 
 }

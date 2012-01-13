@@ -95,7 +95,7 @@ class MemcacheServer(uri:URI) {
 
     transport_server = new TcpTransportServer(uri)
     transport_server.setDispatchQueue(Dispatch.createQueue("server"))
-    transport_server.setAcceptListener(new TransportServerListener {
+    transport_server.setTransportServerListener(new TransportServerListener {
       def onAccept(transport: Transport): Unit = {
         try {
           new MemcacheConnection(MemcacheServer.this, transport)
